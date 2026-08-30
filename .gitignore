@@ -1,0 +1,16 @@
+# Runtime data — created when you actually run the app, not source code
+config.json
+history.json
+
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# Editor/OS cruft
+.vscode/
+.DS_Store

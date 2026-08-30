@@ -1,0 +1,30 @@
+AutoFlow Source-Available License
+
+Copyright (c) 2026 [AerroCodes]. All rights reserved.
+
+This repository's source code is made publicly available for viewing,
+personal use, and learning purposes, subject to the following terms:
+
+1. PERMITTED
+   - Viewing, reading, and studying the source code.
+   - Downloading and running AutoFlow for your own personal, non-commercial
+     use, including building it yourself with PyInstaller.
+   - Modifying your own local copy for personal use.
+   - Submitting bug reports, suggestions, and pull requests back to this
+     repository.
+
+2. NOT PERMITTED without prior written permission from the copyright holder
+   - Redistributing this software or any modified version of it, in source
+     or compiled (.exe) form, whether for free or for sale.
+   - Publishing this project, or a modified/rebranded version of it, on
+     another platform, app store, or repository.
+   - Using this software or any part of it for commercial purposes.
+   - Removing or altering this license or the AutoFlow name/branding when
+     sharing or referencing the project.
+
+3. NO WARRANTY
+   This software is provided "as is", without warranty of any kind, express
+   or implied. The author is not liable for any damages arising from its use.
+
+If you'd like to use, redistribute, or build on this project beyond what's
+permitted above, please reach out to the copyright holder first.

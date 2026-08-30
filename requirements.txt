@@ -1,0 +1,16 @@
+# GUI framework — modern flat-UI look on top of tkinter.
+customtkinter>=5.2.0
+
+# Optional but recommended: enables the F8 hotkey to work globally,
+# even when the AutoFlow window isn't focused.
+# On Windows this just works. On Linux it usually needs to be run as root/sudo.
+keyboard>=0.13.5
+
+# Optional: only needed if your macros use pyautogui (clicking/typing),
+# like example_typer.py does.
+pyautogui>=0.9.54
+
+# Optional: enables minimize-to-system-tray. Without it, closing the window
+# just quits normally. Pillow is pystray's dependency for loading the tray icon image.
+pystray>=0.19.5
+Pillow>=10.0.0
