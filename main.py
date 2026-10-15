@@ -6,6 +6,8 @@ A small desktop app for running your own drop-in Python macros.
 
 - Put .py files (each defining `def run(stop_event): ...`) into macros/
 - Pick one, hit Start (or press F8) to run it
+- Optionally bind a macro to a target window; macros defined as
+  `def run(stop_event, window): ...` then type into it in the background
 - Press F8 again (or hit Stop) to stop it
 - Dashboard shows live stats, Macros page runs things, History tracks past
   runs, Settings lets you change the hotkey.
@@ -15,6 +17,7 @@ Run it with:  python main.py
 
 import ctypes
 import importlib.util
+import inspect
 import json
 import os
 import queue
@@ -38,6 +41,8 @@ try:
 except ImportError:
     TRAY_AVAILABLE = False
 
+import target_window
+
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
@@ -60,6 +65,11 @@ Requirements for the macro file:
           return
 - Anything printed with print() shows up in the app's log panel — add helpful print() statements so I can see what it's doing.
 - If you need pyautogui (for clicking/typing) or any other optional library, import it INSIDE run(), not at the top of the file, and print a friendly message if the import fails (e.g. "Run: pip install pyautogui").
+- If the macro should type into one specific app window (e.g. a Discord channel) while I keep using my PC, define it as def run(stop_event, window): instead. AutoFlow then passes the window I picked, and the macro must use ONLY these methods to send input to it (they work in the background; don't use pyautogui for that window):
+      window.send("text")        # types the text and presses Enter
+      window.type("text")        # types without pressing Enter
+      window.press("enter")      # one key: enter, tab, esc, backspace, space, up/down/left/right, f1..f24, or a single character
+  Key combos (ctrl+...) and mouse clicks are NOT supported in the background.
 - Output ONLY the complete Python file content, ready to save as a .py file — no extra explanation before or after.
 
 Here's the minimal expected structure:
@@ -74,6 +84,17 @@ Here's the minimal expected structure:
                 return
             print(i)
         print("Macro finished")
+
+Background version that sends a chat message to the chosen window every 10 seconds:
+
+    from macro_api import sleep
+
+    def run(stop_event, window):
+        while not stop_event.is_set():
+            window.send("hello")
+            print("Sent a message")
+            if sleep(10, stop_event):
+                return
 
 Now write the macro for this task:
 [DESCRIBE WHAT YOU WANT THE MACRO TO DO HERE]
@@ -209,10 +230,14 @@ class MacroRow(ctk.CTkFrame):
         self.name_label = ctk.CTkLabel(self, text=name, text_color=TEXT, font=(FONT, 13), anchor="w")
         self.name_label.grid(row=0, column=1, sticky="w", pady=10)
 
-        self.status_label = ctk.CTkLabel(self, text="idle", text_color=TEXT_DIM, font=(FONT, 11))
-        self.status_label.grid(row=0, column=2, padx=(4, 14), pady=10)
+        # shown when the macro is bound to a target window
+        self.target_label = ctk.CTkLabel(self, text="", text_color=ACCENT_DIM, font=(FONT, 13), width=18)
+        self.target_label.grid(row=0, column=2, padx=(4, 0), pady=10)
 
-        for widget in (self, self.dot, self.name_label, self.status_label):
+        self.status_label = ctk.CTkLabel(self, text="idle", text_color=TEXT_DIM, font=(FONT, 11))
+        self.status_label.grid(row=0, column=3, padx=(4, 14), pady=10)
+
+        for widget in (self, self.dot, self.name_label, self.target_label, self.status_label):
             widget.bind("<Button-1>", self._click)
             widget.bind("<Enter>", self._enter)
             widget.bind("<Leave>", self._leave)
@@ -233,6 +258,9 @@ class MacroRow(ctk.CTkFrame):
         self.configure(fg_color=CARD_SELECTED if selected else CARD,
                         border_color=ACCENT if selected else BORDER)
 
+    def set_target(self, has_target):
+        self.target_label.configure(text="⧉" if has_target else "")
+
     def set_status(self, status):
         self.status = status
         if status == "running":
@@ -241,6 +269,16 @@ class MacroRow(ctk.CTkFrame):
         else:
             self.dot.configure(text_color=TEXT_DIM)
             self.status_label.configure(text="idle", text_color=TEXT_DIM)
+
+
+def _accepts_window(run):
+    """True if a macro's run() wants a target window: run(stop_event, window)."""
+    try:
+        params = inspect.signature(run).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 2
 
 
 def fmt_duration(seconds):
@@ -269,6 +307,90 @@ class Card(ctk.CTkFrame):
         super().__init__(master, **kwargs)
 
 
+class WindowPicker(ctk.CTkToplevel):
+    """Modal list of open windows; calls on_pick({"title", "exe", "hwnd"})."""
+
+    def __init__(self, master, on_pick):
+        super().__init__(master)
+        self.on_pick = on_pick
+        self.title("Choose target window")
+        self.geometry("560x480")
+        self.minsize(420, 320)
+        self.configure(fg_color=BG)
+        self.transient(master)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+
+        ctk.CTkLabel(
+            self, text="Pick the window this macro should type into. Its title is used to find it\n"
+                       "again later — for Discord, open the right channel first.",
+            text_color=TEXT_DIM, font=(FONT, 12), justify="left",
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 10))
+
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.grid(row=1, column=0, sticky="ew", padx=18)
+        top.columnconfigure(0, weight=1)
+        self.search = ctk.CTkEntry(
+            top, placeholder_text="Filter by title or app…", height=32, corner_radius=8,
+            fg_color=CARD, border_color=BORDER, text_color=TEXT, font=(FONT, 12),
+        )
+        self.search.grid(row=0, column=0, sticky="ew")
+        self.search.bind("<KeyRelease>", lambda _e: self._populate())
+        ctk.CTkButton(
+            top, text="⟳", width=32, height=32, corner_radius=8,
+            fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT, border_width=1, border_color=BORDER,
+            command=self._reload,
+        ).grid(row=0, column=1, padx=(8, 0))
+
+        self.list = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.list.grid(row=2, column=0, sticky="nsew", padx=10, pady=12)
+        self.list.columnconfigure(0, weight=1)
+
+        self._reload()
+        self.after(250, self._set_icon)  # CTkToplevel swaps in its own icon shortly after opening
+        self.after(50, self._grab)
+
+    def _grab(self):
+        try:
+            self.grab_set()
+            self.search.focus_set()
+        except tk.TclError:
+            pass  # window not viewable yet / already closed
+
+    def _set_icon(self):
+        ico_path = os.path.join(BASE_DIR, "assets", "icon.ico")
+        try:
+            if sys.platform.startswith("win") and os.path.exists(ico_path):
+                self.iconbitmap(ico_path)
+        except Exception:
+            pass
+
+    def _reload(self):
+        self.windows = target_window.list_windows()
+        self._populate()
+
+    def _populate(self):
+        for w in self.list.winfo_children():
+            w.destroy()
+        query = self.search.get().strip().lower()
+        shown = [w for w in self.windows if query in w["title"].lower() or query in w["exe"].lower()]
+        if not shown:
+            ctk.CTkLabel(self.list, text="No matching windows.", text_color=TEXT_DIM,
+                         font=(FONT, 12)).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+        for i, win in enumerate(shown):
+            title = win["title"] if len(win["title"]) <= 56 else win["title"][:55] + "…"
+            ctk.CTkButton(
+                self.list, text=f"{title}   ·  {win['exe'] or '?'}", anchor="w", height=34, corner_radius=8,
+                fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT, border_width=1, border_color=BORDER,
+                font=(FONT, 12), command=lambda w=win: self._pick(w),
+            ).grid(row=i, column=0, sticky="ew", pady=3)
+
+    def _pick(self, win):
+        self.destroy()
+        self.on_pick(win)
+
+
 class AutoFlowApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -294,6 +416,7 @@ class AutoFlowApp(ctk.CTk):
         self._last_run_error = None
         self._status_listeners = []   # callables(status) -> None
         self._selection_listeners = []  # callables(name) -> None
+        self.current_page = None
 
         self._set_app_icon()
         self._build_shell()
@@ -304,6 +427,7 @@ class AutoFlowApp(ctk.CTk):
 
         self.after(100, self._poll_log_queue)
         self.after(150, self._poll_thread_status)
+        self.after(1000, self._poll_target_status)
         self.after(300, self._set_app_icon)  # customtkinter can reset the icon shortly after startup
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -469,6 +593,7 @@ class AutoFlowApp(ctk.CTk):
             "settings": "Hotkey, folders, and preferences",
         }
         self.page_subtitle.configure(text=subtitles.get(key, ""))
+        self.current_page = key
         for k, btn in self.nav_buttons.items():
             active = k == key
             btn.configure(fg_color=CARD_SELECTED if active else "transparent",
@@ -501,10 +626,12 @@ class AutoFlowApp(ctk.CTk):
             row=0, column=0, sticky="w")
         self.dash_selected_label = ctk.CTkLabel(inner, text="No macro selected", text_color=TEXT,
                                                  font=(FONT, 18, "bold"), anchor="w")
-        self.dash_selected_label.grid(row=1, column=0, sticky="w", pady=(2, 12))
+        self.dash_selected_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.dash_target_label = ctk.CTkLabel(inner, text="", text_color=TEXT_DIM, font=(FONT, 12), anchor="w")
+        self.dash_target_label.grid(row=2, column=0, sticky="w", pady=(0, 12))
 
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_row.grid(row=2, column=0, sticky="w")
+        btn_row.grid(row=3, column=0, sticky="w")
         dash_start = ctk.CTkButton(
             btn_row, text="▶  Start", corner_radius=10, height=38, width=120,
             fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#00120d",
@@ -537,6 +664,8 @@ class AutoFlowApp(ctk.CTk):
 
         def quick_select_cb(name):
             self.dash_selected_label.configure(text=name or "No macro selected")
+            target = self._targets().get(name)
+            self.dash_target_label.configure(text=f"⧉  in background → {target['title']}" if target else "")
         self._selection_listeners.append(quick_select_cb)
 
         # recent activity card
@@ -705,6 +834,34 @@ class AutoFlowApp(ctk.CTk):
         def macros_select_cb(name):
             self.selected_label.configure(text=name or "No macro selected")
         self._selection_listeners.append(macros_select_cb)
+
+        target_section = ctk.CTkFrame(right, fg_color="transparent")
+        target_section.grid(row=2, column=0, sticky="ew", padx=20, pady=(14, 0))
+        target_section.columnconfigure(0, weight=1)
+        ctk.CTkLabel(target_section, text="TARGET WINDOW", text_color=TEXT_DIM,
+                     font=(FONT, 11, "bold")).grid(row=0, column=0, sticky="w")
+        self.target_state_label = ctk.CTkLabel(target_section, text="", text_color=TEXT_DIM, font=(FONT, 11))
+        self.target_state_label.grid(row=0, column=1, columnspan=2, sticky="e")
+        self.target_entry = ctk.CTkEntry(
+            target_section, placeholder_text="None — macro uses the real keyboard/mouse", height=32,
+            corner_radius=8, fg_color=CARD, border_color=BORDER, text_color=TEXT, font=(FONT, 12),
+        )
+        self.target_entry.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.target_entry.bind("<Return>", lambda _e: self._commit_target_entry())
+        self.target_entry.bind("<FocusOut>", lambda _e: self._commit_target_entry())
+        ctk.CTkButton(
+            target_section, text="Choose…", width=90, height=32, corner_radius=8,
+            fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT, border_width=1, border_color=BORDER,
+            font=(FONT, 12), command=self._choose_target,
+        ).grid(row=1, column=1, padx=(8, 0), pady=(6, 0))
+        ctk.CTkButton(
+            target_section, text="✕", width=32, height=32, corner_radius=8,
+            fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT_DIM, border_width=1, border_color=BORDER,
+            command=self._clear_target,
+        ).grid(row=1, column=2, padx=(8, 0), pady=(6, 0))
+        self.target_hint = ctk.CTkLabel(target_section, text="", text_color=TEXT_DIM, font=(FONT, 11),
+                                        anchor="w", justify="left")
+        self.target_hint.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         log_section = ctk.CTkFrame(right, fg_color="transparent")
         log_section.grid(row=3, column=0, sticky="nsew", padx=20, pady=(10, 20))
@@ -908,6 +1065,7 @@ class AutoFlowApp(ctk.CTk):
         for i, name in enumerate(self.macros):
             row = MacroRow(self.list_scroll, name, self._on_select)
             row.grid(row=i, column=0, sticky="ew", pady=4)
+            row.set_target(name in self._targets())
             self.rows[name] = row
 
         last = self.cfg.get("last_selected")
@@ -924,6 +1082,7 @@ class AutoFlowApp(ctk.CTk):
             self._refresh_dashboard()
 
     def _on_select(self, name):
+        self._commit_target_entry()  # keep an unsaved edit for the macro we're leaving
         if self.selected_name and self.selected_name in self.rows:
             self.rows[self.selected_name].set_selected(False)
         self.selected_name = name
@@ -933,6 +1092,91 @@ class AutoFlowApp(ctk.CTk):
             cb(name)
         self.cfg["last_selected"] = name
         save_config(self.cfg)
+        self._refresh_target_ui()
+
+    # ------------------------------------------------------- target window
+    def _targets(self):
+        """Per-macro target windows: {macro name: {"title": ..., "exe": ...}}."""
+        return self.cfg.setdefault("targets", {})
+
+    def _set_target(self, name, target):
+        if target:
+            self._targets()[name] = target
+        else:
+            self._targets().pop(name, None)
+        save_config(self.cfg)
+        if name in self.rows:
+            self.rows[name].set_target(bool(target))
+        for cb in self._selection_listeners:
+            cb(self.selected_name)
+        self._refresh_target_ui()
+
+    def _refresh_target_ui(self):
+        name = self.selected_name
+        target = self._targets().get(name) if name else None
+        self.target_entry.configure(state="normal")
+        self.target_entry.delete(0, "end")
+        if target:
+            self.target_entry.insert(0, target["title"])
+            app = f"in {target['exe']}" if target.get("exe") else "in any app"
+            self.target_hint.configure(
+                text=f"Matches the window whose title contains this text, {app}. Shorten it to match more loosely.\n"
+                     f"Macros written as run(stop_event, window) type into it in the background.")
+        else:
+            self.target_hint.configure(
+                text="Optional. Pick a window and macros written as run(stop_event, window) type into it\n"
+                     "in the background — it can sit behind other windows while you use your PC.")
+        if not name:
+            self.target_entry.configure(state="disabled")
+        self._update_target_state()
+
+    def _commit_target_entry(self):
+        name = self.selected_name
+        if not name or not hasattr(self, "target_entry"):
+            return
+        text = self.target_entry.get().strip()
+        current = self._targets().get(name)
+        if not text and current:
+            self._set_target(name, None)
+        elif text and (not current or current["title"] != text):
+            self._set_target(name, {"title": text, "exe": current.get("exe") if current else None})
+
+    def _choose_target(self):
+        name = self.selected_name
+        if not name:
+            self._log("[!] Select a macro first.\n")
+            return
+        if not target_window.IS_WINDOWS:
+            messagebox.showinfo("AutoFlow", "Target windows are only supported on Windows.")
+            return
+
+        def picked(win):
+            self._set_target(name, {"title": target_window.stable_title(win["title"]), "exe": win["exe"] or None})
+            target_window.flash_window(win["hwnd"])
+
+        WindowPicker(self, picked)
+
+    def _clear_target(self):
+        if self.selected_name:
+            self._set_target(self.selected_name, None)
+
+    def _update_target_state(self):
+        target = self._targets().get(self.selected_name) if self.selected_name else None
+        if not target:
+            self.target_state_label.configure(text="")
+            return
+        hwnd = target_window.find_window(target["title"], target.get("exe"))
+        if not hwnd:
+            self.target_state_label.configure(text="○ window not open", text_color=TEXT_DIM)
+        elif target_window.blocked_by_minimize(hwnd):
+            self.target_state_label.configure(text="◐ minimized — un-minimize it", text_color=RED)
+        else:
+            self.target_state_label.configure(text="● window found", text_color=ACCENT)
+
+    def _poll_target_status(self):
+        if self.current_page == "macros" and self.state() != "withdrawn":
+            self._update_target_state()
+        self.after(1000, self._poll_target_status)
 
     def _copy_ai_prompt(self):
         try:
@@ -971,6 +1215,10 @@ class AutoFlowApp(ctk.CTk):
             "    if sleep(1, stop_event):   # waits 1s, returns True if stopped early\n"
             "        return\n\n"
             "Anything you print() shows up in AutoFlow's LOG panel.\n\n"
+            "Want it to type into one window in the background (e.g. a Discord\n"
+            "channel) while you keep using your PC? Write `def run(stop_event, window):`,\n"
+            "pick the window under TARGET WINDOW, and use window.send(\"text\"),\n"
+            "window.type(\"text\") or window.press(\"enter\").\n\n"
             "New to this? Click \"Copy AI Prompt\" next to New Macro, paste it into\n"
             "an AI chatbot with a description of what you want, and paste what it\n"
             "gives back in here.\n"
@@ -1036,15 +1284,29 @@ class AutoFlowApp(ctk.CTk):
             self._log(f"[!] Macro '{name}' has no run(stop_event) function.\n")
             return
 
+        binding = self._targets().get(name)
+        wants_window = _accepts_window(module.run)
+        if wants_window and not binding:
+            self._log(f"[!] '{name}' types into a target window — pick one under TARGET WINDOW first.\n")
+            return
+
         self.stop_event = threading.Event()
+        args = [self.stop_event]
+        if wants_window:
+            args.append(target_window.TargetWindow(binding["title"], binding.get("exe"), self.stop_event))
         self._last_run_error = None
         self.current_run = {"name": name, "start": time.time()}
         self._log(f"\n=== Starting '{name}' — {time.strftime('%H:%M:%S')} ===\n")
+        if wants_window:
+            self._log(f"[i] Running in the background in '{binding['title']}'.\n")
+        elif binding:
+            self._log("[i] A target window is set, but this macro's run() has no `window` argument,\n"
+                      "    so it uses the real keyboard/mouse in whatever window is focused.\n")
 
         def target():
             sys.stdout = QueueWriter(self.log_queue)
             try:
-                module.run(self.stop_event)
+                module.run(*args)
             except Exception as e:
                 self._last_run_error = str(e)
                 self.log_queue.put(f"[!] Macro error: {e}\n")
