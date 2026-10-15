@@ -106,6 +106,10 @@ EXTENDED_KEYS = {0x2D, 0x2E, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28}
 # forwards input to its renderer asynchronously, so this can't be zero.
 ACTIVATE_SETTLE = 0.3
 INPUT_SETTLE = 0.3
+# Untouched for longer than WAKE_AFTER seconds, the target first gets a
+# wake-up activation of WAKE_SETTLE seconds (see TargetWindow._burst).
+WAKE_AFTER = 15.0
+WAKE_SETTLE = 1.5
 # The target turns a posted KEYDOWN into WM_CHAR at the *back* of its queue,
 # so it must get to that key before more text is posted after it.
 KEY_SETTLE = 0.03
@@ -237,6 +241,16 @@ def _send(hwnd, msg, wparam=0, lparam=0):
     user32.SendMessageTimeoutW(hwnd, msg, wparam, lparam, SMTO_ABORTIFHUNG, 1000, ctypes.byref(result))
 
 
+def _fake_activate(hwnd):
+    _send(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
+    _send(hwnd, WM_SETFOCUS, 0, 0)
+
+
+def _fake_deactivate(hwnd):
+    _send(hwnd, WM_KILLFOCUS, 0, 0)
+    _send(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
+
+
 def _post(hwnd, msg, wparam=0, lparam=0):
     user32.PostMessageW(hwnd, msg, wparam, _lparam(lparam))
 
@@ -306,6 +320,7 @@ class TargetWindow:
         self.stop_event = stop_event
         self._hwnd = None
         self._waiting = None  # why wait() is currently blocked, to log each reason once
+        self._last_input = 0.0
 
     def __repr__(self):
         return f"TargetWindow({self.title_match!r}, exe={self.exe!r})"
@@ -387,18 +402,24 @@ class TargetWindow:
             return False
         foreground = user32.GetForegroundWindow() == hwnd
         if not foreground:
-            _send(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
-            _send(hwnd, WM_SETFOCUS, 0, 0)
+            if time.time() - self._last_input > WAKE_AFTER:
+                # After a while in the background Discord puts the focus back
+                # into its message box only lazily, so the first input would
+                # get lost. A wake-up activation without input lets it settle.
+                _fake_activate(hwnd)
+                time.sleep(WAKE_SETTLE)
+                _fake_deactivate(hwnd)
+            _fake_activate(hwnd)
             time.sleep(ACTIVATE_SETTLE)
         try:
             action(hwnd)
             time.sleep(INPUT_SETTLE)
         finally:
+            self._last_input = time.time()
             # The user may have switched to the target meanwhile — don't
             # yank it back out of focus then.
             if not foreground and user32.GetForegroundWindow() != hwnd:
-                _send(hwnd, WM_KILLFOCUS, 0, 0)
-                _send(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
+                _fake_deactivate(hwnd)
         return True
 
     def type(self, text, interval=0.0):
