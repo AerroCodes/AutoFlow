@@ -15,6 +15,12 @@ instead of raw time.sleep() so your macro actually responds to Stop.
 
 Anything you `print()` inside your macro shows up in the app's log panel.
 
+To work in one window in the background (pick it under TARGET WINDOW in the
+app), take a second argument — see target_window.TargetWindow:
+
+    def run(stop_event, window):
+        window.send("hello")   # types into that window + Enter, no focus needed
+
 MINIMAL EXAMPLE
 ----------------
     from macro_api import sleep
