@@ -1032,7 +1032,8 @@ class AutoFlowApp(ctk.CTk):
                 new_hk = keyboard.read_hotkey(suppress=False)
                 self.after(0, lambda: self._finish_hotkey_capture(new_hk))
             except Exception as e:
-                self.after(0, lambda: self._finish_hotkey_capture(None, error=str(e)))
+                # bind now: Python unbinds `e` when the except block ends
+                self.after(0, lambda err=str(e): self._finish_hotkey_capture(None, error=err))
 
         threading.Thread(target=worker, daemon=True).start()
 
