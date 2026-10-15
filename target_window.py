@@ -104,8 +104,8 @@ EXTENDED_KEYS = {0x2D, 0x2E, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28}
 # How long the target gets to start handling input after the fake activation,
 # and to finish handling it before it's told it's inactive again. Chromium
 # forwards input to its renderer asynchronously, so this can't be zero.
-ACTIVATE_SETTLE = 0.06
-INPUT_SETTLE = 0.15
+ACTIVATE_SETTLE = 0.3
+INPUT_SETTLE = 0.3
 # The target turns a posted KEYDOWN into WM_CHAR at the *back* of its queue,
 # so it must get to that key before more text is posted after it.
 KEY_SETTLE = 0.03
@@ -252,7 +252,9 @@ def _key_lparam(vk, up):
 
 
 def _is_chromium(hwnd):
-    return bool(user32.FindWindowExW(hwnd, None, "Chrome_RenderWidgetHostHWND", None))
+    # Every Chromium/Electron top-level window has this class; newer Electron
+    # (e.g. Discord) no longer has the Chrome_RenderWidgetHostHWND child.
+    return _class_name(hwnd).startswith("Chrome_WidgetWin")
 
 
 def blocked_by_minimize(hwnd):
@@ -270,11 +272,11 @@ def _keyboard_target(hwnd):
         if info.hwndFocus == hwnd or user32.IsChild(hwnd, info.hwndFocus):
             return info.hwndFocus
     # Focus is only reported for the foreground thread, so for a background
-    # window guess: Chromium/Electron's render widget, else the first text
-    # box (Notepad, WordPad, editors, ...), else the window itself.
-    render = user32.FindWindowExW(hwnd, None, "Chrome_RenderWidgetHostHWND", None)
-    if render:
-        return render
+    # window guess: Chromium/Electron takes input on its render widget if it
+    # still has one, else on the top-level window; anything else on its first
+    # text box (Notepad, WordPad, editors, ...).
+    if _is_chromium(hwnd):
+        return user32.FindWindowExW(hwnd, None, "Chrome_RenderWidgetHostHWND", None) or hwnd
     editors = []
 
     @WNDENUMPROC
